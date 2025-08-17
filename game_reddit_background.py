@@ -8,6 +8,7 @@ Background music: https://soundcloud.com/crig-1/star-wars-theme-8bit
 
 import pygame, sys, random, requests, time, threading
 from io import BytesIO
+from queue import Queue
 
 pygame.init()
 pygame.mixer.init()
@@ -27,30 +28,50 @@ RED = (255,0,0)
 shoot_sound = pygame.mixer.Sound("laser.wav")
 explosion_sound = pygame.mixer.Sound("explosion.wav")
 pygame.mixer.music.load("background_music.mp3")
-shoot_sound.set_volume(0.5)   # volume between 0.0 and 1.0
-explosion_sound.set_volume(0.5)   # volume between 0.0 and 1.0
+shoot_sound.set_volume(0.5)
+explosion_sound.set_volume(0.5)
 
-# --- Set window centered and always on top ---
+# --- Window setup ---
 import os
 os.environ['SDL_VIDEO_WINDOW_POS'] = "center"
-screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.NOFRAME)
+screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
 pygame.display.set_caption("1942 Clone")
 
-# --- Helper to load unique Reddit images ---
+# --- Reddit background loader ---
+reddit_queue = Queue(maxsize=5)
 used_urls = set()
 reddit_lock = threading.Lock()
+stop_event = threading.Event()
 
-def fetch_reddit_image(used_urls, subreddits=["spaceporn","EarthPorn","astrophotography"], limit=50):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    while True:
+def fetch_reddit_images(subreddits=["spaceporn","EarthPorn","astrophotography"], limit=50):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    }
+    while not stop_event.is_set():
+        if reddit_queue.full():
+            time.sleep(1)
+            continue
         try:
             subreddit = random.choice(subreddits)
             url = f"https://www.reddit.com/r/{subreddit}/top/.json?limit={limit}&t=month"
             response = requests.get(url, headers=headers, timeout=10)
+            if stop_event.is_set(): break
+            if response.status_code == 429:
+                print("Rate limited by Reddit, waiting 15s...")
+                time.sleep(15)
+                continue
+            elif response.status_code != 200:
+                print(f"Failed to load Reddit image, status code: {response.status_code}")
+                time.sleep(5)
+                continue
+
             data = response.json()
             posts = data["data"]["children"]
             random.shuffle(posts)
+
             for post in posts:
+                if stop_event.is_set(): break
                 img_url = post["data"].get("url_overridden_by_dest") or post["data"].get("url","")
                 with reddit_lock:
                     if img_url in used_urls:
@@ -59,7 +80,7 @@ def fetch_reddit_image(used_urls, subreddits=["spaceporn","EarthPorn","astrophot
                     img_response = requests.get(img_url, timeout=10)
                     img = pygame.image.load(BytesIO(img_response.content)).convert_alpha()
                     w,h = img.get_width(), img.get_height()
-                    scale = min(WINDOW_WIDTH/w, WINDOW_HEIGHT/h, 1)
+                    scale = min(WINDOW_WIDTH/w, 1440/h, 1)  # max height 1440
                     new_w,new_h = int(w*scale), int(h*scale)
                     img = pygame.transform.smoothscale(img,(new_w,new_h))
                     bg = pygame.Surface((WINDOW_WIDTH,WINDOW_HEIGHT))
@@ -67,28 +88,15 @@ def fetch_reddit_image(used_urls, subreddits=["spaceporn","EarthPorn","astrophot
                     bg.blit(img,((WINDOW_WIDTH-new_w)//2,(WINDOW_HEIGHT-new_h)//2))
                     with reddit_lock:
                         used_urls.add(img_url)
-                    return bg, img_url
+                    reddit_queue.put(bg)
+                    break
         except Exception as e:
-            print("Failed to load Reddit image, retrying...", e)
-            time.sleep(1)
+            print("Failed to fetch Reddit image, retrying...", e)
+            time.sleep(5)
 
-# --- Background loader thread ---
-next_bg = None
-next_url = None
-bg_ready_event = threading.Event()
-
-def preload_next_bg():
-    global next_bg, next_url
-    while True:
-        bg, url = fetch_reddit_image(used_urls)
-        next_bg = bg
-        next_url = url
-        bg_ready_event.set()
-        bg_ready_event.wait()  # wait until main thread consumes it
-        bg_ready_event.clear()
-
-bg_thread = threading.Thread(target=preload_next_bg, daemon=True)
-bg_thread.start()
+# Start background loader thread
+reddit_thread = threading.Thread(target=fetch_reddit_images, daemon=True)
+reddit_thread.start()
 
 # --- Sprites ---
 class Bullet(pygame.sprite.Sprite):
@@ -108,7 +116,7 @@ class Enemy(pygame.sprite.Sprite):
         self.image = pygame.image.load("tie_fighter.png").convert_alpha()
         self.image = pygame.transform.scale(self.image,(64,64))
         self.rect = self.image.get_rect(topleft=(x,y))
-        self.speed = random.uniform(1,3)
+        self.speed = random.uniform(2,4)
         self.health = 1
     def update(self):
         self.rect.y += self.speed
@@ -124,7 +132,7 @@ class EnemyStrong(pygame.sprite.Sprite):
             self.image = pygame.Surface((72,72))
             self.image.fill(RED)
         self.rect = self.image.get_rect(topleft=(x,y))
-        self.speed = random.uniform(0.5,2)
+        self.speed = random.uniform(1.5,2)
         self.health = 3
     def update(self):
         self.rect.y += self.speed
@@ -170,9 +178,17 @@ bullets_group = pygame.sprite.Group()
 player = Player(WINDOW_WIDTH//2-32, WINDOW_HEIGHT-100)
 all_sprites.add(player)
 
-# --- Load initial backgrounds ---
-current_bg, current_url = fetch_reddit_image(used_urls)
+# --- Initial background ---
+current_bg = None
+next_bg = None
 bg_y = 0
+
+# Wait until at least one background is ready
+while current_bg is None:
+    try:
+        current_bg = reddit_queue.get(timeout=0.1)
+    except:
+        pygame.event.pump()
 
 # --- Game vars ---
 score = 0
@@ -180,8 +196,8 @@ enemy_spawn_timer = 0
 game_over = False
 clock = pygame.time.Clock()
 
+pygame.mixer.music.play(-1)
 
-pygame.mixer.music.play(-1)  # -1 makes it loop forever
 # --- Main loop ---
 running = True
 while running:
@@ -236,12 +252,13 @@ while running:
         if not player.is_alive(): game_over = True
 
     # --- Background scroll ---
+    if next_bg is None and not reddit_queue.empty():
+        next_bg = reddit_queue.get()
     bg_y += BG_SCROLL_SPEED
     if bg_y >= WINDOW_HEIGHT:
         current_bg = next_bg if next_bg else current_bg
+        next_bg = None
         bg_y = 0
-        if bg_ready_event.is_set():
-            bg_ready_event.clear()  # allow loader thread to preload next
 
     if next_bg:
         screen.blit(current_bg,(0,bg_y-WINDOW_HEIGHT))
@@ -271,5 +288,8 @@ while running:
     pygame.display.flip()
     clock.tick(FPS)
 
+# --- Clean exit ---
+stop_event.set()
+reddit_thread.join()
 pygame.quit()
 sys.exit()
