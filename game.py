@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sun Aug 17 14:02:27 2025
-
-@author: Eddie
-"""
-
-# -*- coding: utf-8 -*-
-"""
 Created on Sun Aug 17 12:47:01 2025
 
 @author: Eddie
+Laser sound effect: https://freesound.org/people/bubaproducer/sounds/151019/
 """
 import pygame
 import sys
 import random
 
 pygame.init()
+pygame.mixer.init()
+
+# Load sounds
+shoot_sound = pygame.mixer.Sound("laser.wav")
+explosion_sound = pygame.mixer.Sound("explosion.wav")
 
 # Constants - these won't change during the game
 SCREEN_WIDTH = 600
@@ -29,39 +28,27 @@ GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 RED = (255, 0, 0)
 
-class Bullet:
+class Bullet(pygame.sprite.Sprite):
     """A bullet that moves up the screen"""
     def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.width = 4
-        self.height = 10
-        self.speed = 8  # How fast bullet moves
+        super().__init__()
+        self.image = pygame.image.load("torpedo.png").convert_alpha()
+        self.image = pygame.transform.scale(self.image, (8, 16))  # adjust size
+        self.rect = self.image.get_rect()
+        self.rect.centerx = x
+        self.rect.y = y
+        self.speed = 8
     
     def update(self):
         """Move bullet up the screen"""
-        self.y -= self.speed  # Negative because up is negative in pygame
+        self.rect.y -= self.speed
+        if self.rect.bottom < 0:
+            self.kill()  # remove from group automatically
     
-    def draw(self, screen):
-        """Draw bullet as a blue rectangle"""
-        pygame.draw.rect(screen, BLUE, (self.x, self.y, self.width, self.height))
-    
-    def is_off_screen(self):
-        """Check if bullet has gone off the top of the screen"""
-        return self.y < -self.height
-    
-    def get_rect(self):
-        """Return a rectangle for collision detection"""
-        return pygame.Rect(self.x, self.y, self.width, self.height)
-
 class Enemy(pygame.sprite.Sprite):
     """An enemy plane that moves down the screen"""
     def __init__(self, x, y):
         super().__init__()
-        #self.image = pygame.Surface((30, 25), pygame.SRCALPHA)
-        # Draw enemy as a red triangle pointing down
-        #points = [(15, 25), (0, 0), (30, 0)]  # Bottom point, Top left, Top right
-        #pygame.draw.polygon(self.image, RED, points)
 
         self.image = pygame.image.load("tie_fighter.png").convert_alpha()
         self.image = pygame.transform.scale(self.image, (64, 64))
@@ -83,6 +70,38 @@ class Enemy(pygame.sprite.Sprite):
     def get_rect(self):
         """Return rectangle for collision detection"""
         return self.rect
+
+class EnemyStrong(pygame.sprite.Sprite):
+    """A stronger enemy that takes more hits"""
+    def __init__(self, x, y):
+        super().__init__()
+
+        try:
+            self.image = pygame.image.load("tie_bomber.png").convert_alpha()
+            self.image = pygame.transform.scale(self.image, (72, 72))  # slightly bigger
+        except pygame.error:
+            # fallback to red square
+            self.image = pygame.Surface((72, 72))
+            self.image.fill(RED)
+
+        self.rect = self.image.get_rect()
+        self.rect.x = x
+        self.rect.y = y
+        self.speed = random.uniform(0.5, 2)  # slower than normal enemies
+        self.health = 3  # needs 3 hits to be destroyed
+
+    def update(self):
+        self.rect.y += self.speed
+
+    def is_off_screen(self):
+        return self.rect.y > SCREEN_HEIGHT
+
+    def get_rect(self):
+        return self.rect
+
+    def take_damage(self, damage=1):
+        self.health -= damage
+        return self.health <= 0  # True if dead
 
 class Player(pygame.sprite.Sprite):
     """Player class representing spaceship"""
@@ -107,7 +126,7 @@ class Player(pygame.sprite.Sprite):
         
         # Shooting mechanics
         self.last_shot = 0  # When we last shot
-        self.shot_delay = 200  # Minimum milliseconds between shots
+        self.shot_delay = 250  # Minimum milliseconds between shots
         
         # Health system
         self.health = 100
@@ -132,10 +151,9 @@ class Player(pygame.sprite.Sprite):
         """Create a new bullet if enough time has passed"""
         current_time = pygame.time.get_ticks()  # Get current time in milliseconds
         if current_time - self.last_shot > self.shot_delay:
-            # Create bullet at center of player, slightly above
-            bullet_x = self.rect.centerx - 2  # Center horizontally
-            bullet_y = self.rect.top  # Top of player
-            bullets.append(Bullet(bullet_x, bullet_y))
+            bullet = Bullet(self.rect.centerx, self.rect.top)
+            bullets_group.add(bullet)
+            shoot_sound.play()   # 🔊 play sound here
             self.last_shot = current_time
     
     def take_damage(self, damage):
@@ -150,6 +168,35 @@ class Player(pygame.sprite.Sprite):
     def is_alive(self):
         return self.health > 0
 
+class Star:
+    def __init__(self):
+        self.x = random.randint(0, SCREEN_WIDTH)
+        self.y = random.randint(0, SCREEN_HEIGHT)
+        self.size = random.randint(1, 3)   # small to large stars
+        self.speed = random.uniform(0.5, 2.5)  # parallax scrolling
+        self.brightness = random.randint(100, 255)  # initial brightness
+        self.twinkle_speed = random.choice([1, -1])  # direction of brightness change
+
+    def update(self):
+        self.y += self.speed
+        if self.y > SCREEN_HEIGHT:
+            # Recycle star to top
+            self.y = 0
+            self.x = random.randint(0, SCREEN_WIDTH)
+
+        # Twinkle effect (brightness up and down)
+        self.brightness += self.twinkle_speed * 5
+        if self.brightness >= 255:
+            self.brightness = 255
+            self.twinkle_speed = -1
+        elif self.brightness <= 100:
+            self.brightness = 100
+            self.twinkle_speed = 1
+
+    def draw(self, screen):
+        color = (self.brightness, self.brightness, self.brightness)
+        pygame.draw.circle(screen, color, (int(self.x), int(self.y)), self.size)
+
 # Initialize screen and clock
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("My 1942 Clone")
@@ -161,8 +208,10 @@ all_sprites = pygame.sprite.Group()
 enemies_group = pygame.sprite.Group()
 all_sprites.add(player)
 
+stars = [Star() for _ in range(100)]  # adjust number of stars
+
 # Game variables
-bullets = []  # List to store all bullets
+bullets_group = pygame.sprite.Group()
 score = 0
 enemy_spawn_timer = 0
 game_over = False
@@ -181,7 +230,6 @@ while running:
                 all_sprites.empty()
                 enemies_group.empty()
                 all_sprites.add(player)
-                bullets.clear()
                 score = 0
                 enemy_spawn_timer = 0
                 game_over = False
@@ -195,22 +243,23 @@ while running:
         
         # Shooting
         if keys[pygame.K_SPACE]:
-            player.shoot(bullets)
+            player.shoot(bullets_group)
             
         # Spawn enemies
         enemy_spawn_timer += 1
-        if enemy_spawn_timer > 60:  # Spawn enemy every 60 frames (1 second)
-            enemy_x = random.randint(0, SCREEN_WIDTH - 30)
-            enemy = Enemy(enemy_x, -30)  # Start above screen
+        if enemy_spawn_timer > 60:
+            enemy_x = random.randint(0, SCREEN_WIDTH - 64)
+        
+            if random.random() < 0.2:  # 20% chance for strong enemy
+                enemy = EnemyStrong(enemy_x, -40)
+            else:
+                enemy = Enemy(enemy_x, -30)
+        
             enemies_group.add(enemy)
-            enemy_spawn_timer = 0        
+            enemy_spawn_timer = 0       
         
         # Update bullets
-        for bullet in bullets[:]:  # [:] creates a copy so we can modify the original
-            bullet.update()
-            # Remove bullets that are off screen
-            if bullet.is_off_screen():
-                bullets.remove(bullet)
+        bullets_group.update()
         
         # Update enemies
         enemies_group.update()
@@ -218,15 +267,15 @@ while running:
             if enemy.is_off_screen():
                 enemies_group.remove(enemy)
 
-        # Check collisions between bullets and enemies
-        for bullet in bullets[:]:
+        # Bullet hits enemy
+        for bullet in bullets_group:
             for enemy in list(enemies_group):
-                if bullet.get_rect().colliderect(enemy.get_rect()):
-                    # Collision! Remove both bullet and enemy
-                    bullets.remove(bullet)
-                    enemies_group.remove(enemy)
-                    score += 100  # Add to score
-                    break  # Exit inner loop since bullet is gone
+                if bullet.rect.colliderect(enemy.rect):
+                    bullet.kill()
+                    enemy.kill()
+                    explosion_sound.play()  # 🔊 play explosion sound
+                    score += 100
+                    break
 
         # Check collisions between player and enemies
         for enemy in list(enemies_group):
@@ -246,9 +295,13 @@ while running:
         # Draw player using sprite group
         all_sprites.draw(screen)
         
+        # Draw starfield background
+        for star in stars:
+            star.update()
+            star.draw(screen)
+        
         # Draw all bullets
-        for bullet in bullets:
-            bullet.draw(screen)
+        bullets_group.draw(screen)
             
         # Draw all enemies
         enemies_group.draw(screen)
